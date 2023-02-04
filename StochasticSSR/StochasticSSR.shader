@@ -36,5 +36,21 @@ Shader "PostProcess/StochasticSSR"
             #pragma shader_feature FULL_PRECISION_SSR
             ENDHLSL
         }
+        Pass
+        {
+        Name "StochasticSSR_Temporal"
+        ZWrite Off
+        ZTest Always
+        CUll off
+        Tags{"LightMode"="PostProcess"}
+            HLSLPROGRAM
+            #include "StochasticSSRBase.hlsl"
+            #pragma vertex Vert_PostProcessDefault
+            #pragma fragment Frag_StochasticSSR_TemporalFilter
+            
+            #pragma shader_feature _GBUFFER_NORMALS_OCT
+            #pragma shader_feature FULL_PRECISION_SSR
+            ENDHLSL
+        }
     }
 }
