@@ -28,11 +28,17 @@ public class StochasticSSR : ScriptableRendererFeature
         [Range(1, 8)] public int HiZLevels = 4;
         [Range(0.0f, 1.0f)] public double MipmapBias_Width = 1.0f;
         [Range(0.0f, 1.0f)] public double MipmapBias_Height = 1.0f;
+
+        [Space(10)]
         [InspectorToggleLeft] public bool BinarySearch = true;
         [Range(1.0f, 3.0f)] public float BinarySearch_Tolerance = 1.4f;
+
+        [Space(10)]
+        public int BinarySearchIterations = 5;
         [InspectorToggleLeft] public bool BilinearDepthBuffer = true;
         public float Bilinear_Tolerance = 0.5f;
-        public int BinarySearchIterations = 5;
+
+        [Space(10)]
         public float Thickness = 0.1f;
         [Range(0.005f, 1.0f)] public float StepLength = 0.1f;
         public int SamplesPerPixel = 2;
@@ -52,6 +58,7 @@ public class StochasticSSR : ScriptableRendererFeature
         private static readonly int P_InvProjection_Matrix_ID = Shader.PropertyToID("InvProjection_Matrix");
         private static readonly int P_Projection_Matrix_ID = Shader.PropertyToID("Projection_Matrix");
         private static readonly int P_fov_ID = Shader.PropertyToID("fov");
+        private static readonly int P_Aspect_ID = Shader.PropertyToID("Aspect");
         private static readonly int P_FarClipPlane_ID = Shader.PropertyToID("F");
         private static readonly int P_NearClipPlane_ID = Shader.PropertyToID("N");
         private static readonly int P_Bilinear_Tolerance_ID = Shader.PropertyToID("Bilinear_Tolerance");
@@ -78,6 +85,7 @@ public class StochasticSSR : ScriptableRendererFeature
         private static readonly int RT_SSR_Denoised_Pre_ID = Shader.PropertyToID("RT_SSR_Denoised_Pre");
         private static readonly int GLOBAL_RT_Stochastic_SSR_ID = Shader.PropertyToID("Stochastic_SSR");
 
+        private static readonly int RT_HiZMipmap_WithMipmap = Shader.PropertyToID("HiZMipmap_WithMipmap");
         private static readonly int[] RT_HiZMipmap_Levels_ID=new int[9] {
         Shader.PropertyToID("HiZMipmap_Level_0"),
         Shader.PropertyToID("HiZMipmap_Level_1"),
@@ -118,6 +126,7 @@ public class StochasticSSR : ScriptableRendererFeature
             MipmapWidth[0] = Mip0Width;
             HiZMipmapBuffers_ID[0] = Shader.PropertyToID("HiZMipmapBuffers_"+0);
             cmd.GetTemporaryRT(HiZMipmapBuffers_ID[0],MipmapWidth[0], MipmapHeight[0], 0, FilterMode.Point,RenderTextureFormat.RHalf);
+            cmd.GetTemporaryRT(RT_HiZMipmap_WithMipmap, MipmapWidth[0], MipmapHeight[0]*3/2, 0, FilterMode.Point, RenderTextureFormat.RHalf);
 
             for (int i = 1; i <= MaxMipLevel; i++)
             {
@@ -125,7 +134,6 @@ public class StochasticSSR : ScriptableRendererFeature
                 MipmapWidth[i] = MipmapWidth[i - 1] / 2;
                 HiZMipmapBuffers_ID[i] = Shader.PropertyToID("HiZMipmapBuffers_" + i);
                 cmd.GetTemporaryRT(HiZMipmapBuffers_ID[i], MipmapWidth[i], MipmapHeight[i], 0, FilterMode.Point, RenderTextureFormat.RHalf);
-
             }
         }
         private void GenerateHiZBuffers(CommandBuffer cmd)
@@ -144,6 +152,14 @@ public class StochasticSSR : ScriptableRendererFeature
                 cmd.SetGlobalTexture(RT_Mip_In_ID, HiZMipmapBuffers_ID[i - 1]);
                 cmd.DrawMesh(RenderingUtils.fullscreenMesh, Matrix4x4.identity, HiZMaterial, 0, 1);
             }
+            for (int i = 0; i <= MaxMipLevel; i++)
+            {
+                cmd.SetGlobalTexture(RT_HiZMipmap_Levels_ID[i], HiZMipmapBuffers_ID[i]);
+            }
+            SSRMaterial.SetInt(P_MaxMipLevels_ID, MaxMipLevel);
+            cmd.SetRenderTarget(RT_HiZMipmap_WithMipmap);
+            cmd.DrawMesh(RenderingUtils.fullscreenMesh,Matrix4x4.identity,HiZMaterial,0,2);
+            cmd.SetGlobalTexture(RT_HiZMipmap_WithMipmap,RT_HiZMipmap_WithMipmap);
         }
         public void DestroyHiZMipmap(CommandBuffer cmd)
         {
@@ -198,9 +214,10 @@ public class StochasticSSR : ScriptableRendererFeature
 
             SSRMaterial.SetMatrix(P_World2View_Matrix_ID, camera.worldToCameraMatrix);
             SSRMaterial.SetMatrix(P_View2World_Matrix_ID, camera.cameraToWorldMatrix);
-            SSRMaterial.SetMatrix(P_Projection_Matrix_ID, camera.projectionMatrix);
-            SSRMaterial.SetMatrix(P_InvProjection_Matrix_ID, camera.projectionMatrix.inverse);
+            SSRMaterial.SetMatrix(P_Projection_Matrix_ID, camera.projectionMatrix);//这个是opengl的矩阵，不适用dx
+            SSRMaterial.SetMatrix(P_InvProjection_Matrix_ID, camera.projectionMatrix.inverse);//这个是opengl的矩阵，不适用dx
             SSRMaterial.SetFloat(P_fov_ID, camera.fieldOfView);
+            SSRMaterial.SetFloat(P_Aspect_ID, camera.aspect);
             SSRMaterial.SetFloat(P_NearClipPlane_ID, camera.nearClipPlane);
             SSRMaterial.SetFloat(P_FarClipPlane_ID, camera.farClipPlane);
 
@@ -235,11 +252,6 @@ public class StochasticSSR : ScriptableRendererFeature
                 cmd.SetViewProjectionMatrices(Matrix4x4.identity, Matrix4x4.identity);
 
                 GenerateHiZBuffers(cmd);
-                for(int i = 0; i <= HiZMipmapBuffers_ID.Length-1; i++)
-                {
-                    cmd.SetGlobalTexture(RT_HiZMipmap_Levels_ID[i], HiZMipmapBuffers_ID[i]);
-                }
-                SSRMaterial.SetInt(P_MaxMipLevels_ID,MaxMipLevel);
 
                 cmd.SetRenderTarget(new RenderTargetIdentifier[2]{ new RenderTargetIdentifier(RT_SSR_Result1_ID), new RenderTargetIdentifier(RT_SSR_Result2_ID) },new RenderTargetIdentifier(RT_SSR_Depth_None_ID));
                 cmd.DrawMesh(RenderingUtils.fullscreenMesh, Matrix4x4.identity, SSRMaterial,0,0);
@@ -270,7 +282,7 @@ public class StochasticSSR : ScriptableRendererFeature
                 {
                     cmd.Blit(RT_SSR_Denoised_ID, renderingData.cameraData.renderer.cameraColorTarget);
                 }
-                cmd.Blit(HiZMipmapBuffers_ID[0],renderingData.cameraData.renderer.cameraColorTarget);
+                //cmd.Blit(RT_HiZMipmap_WithMipmap, renderingData.cameraData.renderer.cameraColorTarget);
 
                 //后处理结束
                 cmd.SetViewProjectionMatrices(camera.worldToCameraMatrix, camera.projectionMatrix);

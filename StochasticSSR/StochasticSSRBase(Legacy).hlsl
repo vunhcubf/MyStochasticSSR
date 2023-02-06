@@ -395,76 +395,90 @@ RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneCo
     Result_None.HitMask=false;
     RayTraceResult Result;
     Result=Result_None;
-
-    [flatten]
+    
+    half Vertical_Extension;
+    half Vertical_Extension_Plane;
+    UNITY_BRANCH
     if(RayDirVs.z>0){
-        RayDirVs*=(-N-RayOriginVs.z)/RayDirVs.z;
+        Vertical_Extension=(-N-RayOriginVs.z)/RayDirVs.z;
+        RayDirVs*=Vertical_Extension;
     }
 
     half Random_Thickness=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed))));
-    half Random_Step=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*2))));
     Thickness*=Random_Thickness;
 
     half3 RayEndVs_Max=RayOriginVs+RayDirVs;
-    half3 RayOriginSS=GetPositionSS(RayOriginVs).xyz;
-    half3 RayEndSS=GetPositionSS(RayEndVs_Max).xyz;
-    half3 RayDirSS=RayEndSS-RayOriginSS;
+    half2 RayOriginSS=GetPositionSS(RayOriginVs).xy;
+    half2 RayEndSS=GetPositionSS(RayEndVs_Max).xy;
+    half2 RayDirSS=RayEndSS-RayOriginSS;
 
+    half L=length(RayDirSS);
     half MinLengthSS=length(rcp(TexelSize.xy));
-    half L=length(RayDirSS.xy);
+    half Random_Step=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*2))));
     half s=max(MinLengthSS,StepLength*Random_Step)/L;
-    RayDirSS*=s;
-    half3 Ray=RayOriginSS;
-    half3 Ray_Pre;
-
-    [loop]
-    for(int i=1;i<=1000;i++){
-        Ray_Pre=Ray;
-        Ray+=RayDirSS;
-        [branch]
+    int Max_StepCount=1+(int)rcp(s*L);
+    half2 RayDirSS_PerStep=RayDirSS*s;
+    half2 Ray;
+    half z0=RayOriginVs.z;
+    half z1=RayEndVs_Max.z;
+    half T=PerspectiveCorrectInterpolateCoefficient_VS(s,z0,z1);
+    z1=z0+T*(z1-z0);
+    half DeltaZ=z0;
+    half Z_Pre=z0;
+    UNITY_LOOP
+    for(int i=1;i<=Max_StepCount;i++){
+        Ray=RayOriginSS+RayDirSS_PerStep*i;
+        UNITY_BRANCH
         if(Ray.x>1.0 || Ray.x<0.0 || Ray.y>1.0 || Ray.y<0.0){return Result_None;}
-        #if defined BILINEAR_DEPTHBUFFER
-        half Delta=LinearEyeDepth(Ray.z,_ZBufferParams)-SampleEyeDepthBilinear(Ray.xy);
-        #else
-        half Delta=LinearEyeDepth(Ray.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(Ray.xy),_ZBufferParams);
-        #endif
+        half t=PerspectiveCorrectInterpolateCoefficient_VS(i,z0,z1);
+        half z=z0*(1-t)+z1*t;
+        UNITY_BRANCH
+        if(-z>F || -z<N){return Result_None;}
+        DeltaZ=z-Z_Pre;
+        Z_Pre=z;
+        half SampleDepth=GetEyeDepth(Ray.xy);
+        half Delta=-z-SampleDepth;
         #if defined BINARY_SEARCH
-        if(Delta>0 && Delta<Thickness*BinarySearch_Tolerance){
-            half3 RayStart_Bin=Ray_Pre;
-            half3 RayEnd_Bin=Ray;
-            half3 RayMid;
-            [loop]
+        UNITY_BRANCH
+        if(Delta>0&& Delta<Thickness*BinarySearch_Tolerance){
+            half BinarySearchLength=0.5f;
+            half2 Ray_Bin;
+            half z_Bin;
+            half IterationsScale=0.25f;
+            half Delta_Bin;
+            UNITY_LOOP
             for(int j=0;j<1+BINARYSEARCHITERATIONS;j++){
-                RayMid=0.5f*(RayStart_Bin+RayEnd_Bin);
-                #if defined BILINEAR_DEPTHBUFFER
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-SampleEyeDepthBilinear(RayMid.xy);
-                #else
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(RayMid.xy),_ZBufferParams);
-                #endif
-                [branch]
+                half S_Bin=i-1.0f+BinarySearchLength;
+                Ray_Bin=RayOriginSS+RayDirSS_PerStep*S_Bin;
+                half T_Bin=PerspectiveCorrectInterpolateCoefficient_VS(S_Bin,z0,z1);
+                z_Bin=z0+T_Bin*(z1-z0);
+                half SampleDepth_Bin=GetEyeDepth(Ray_Bin.xy);
+                Delta_Bin=-z_Bin-SampleDepth_Bin;
+                UNITY_BRANCH
                 if(Delta_Bin>0.0f){//超过
-                    RayEnd_Bin=RayMid;
+                    BinarySearchLength-=IterationsScale;
                 }
                 else{//没超过
-                    RayStart_Bin=RayMid;
+                    BinarySearchLength+=IterationsScale;
                 }
+                IterationsScale*=0.5f;
             }
-            [branch]
-            if(dot(normalize(RayDirVs),GetNormalVs(RayMid.xy))>0.0){return Result_None;}
-            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,RayMid.xy,0).xyz;
-            Result.Hituv=RayMid.xy;
-            Result.HitZBufferdepth=RayMid.z;
+            UNITY_BRANCH
+            if(dot(normalize(RayDirVs),GetNormalVs(Ray_Bin.xy))>0.0){return Result_None;}
+            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Ray_Bin.xy,0).xyz;
+            Result.Hituv=Ray_Bin.xy;
+            Result.HitZBufferdepth=EyeDepthToZbuffer(-z_Bin);
             Result.HitMask=true;
             return Result;
         }
         #else
-        [branch]
+        UNITY_BRANCH
         if(Delta>0 && Delta<Thickness){
-            [branch]
+            UNITY_BRANCH
             if(dot(normalize(RayDirVs),GetNormalVs(Ray.xy))>0.0){return Result_None;}
             Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Ray.xy,0).xyz;
             Result.Hituv=Ray.xy;
-            Result.HitZBufferdepth=Ray.z;
+            Result.HitZBufferdepth=EyeDepthToZbuffer(-z);
             Result.HitMask=true;
             return Result;
         }

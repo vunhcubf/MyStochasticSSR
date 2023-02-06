@@ -28,5 +28,18 @@ Shader "PostProcess/HiZMipmap"
             #pragma fragment Frag_HiZMip_Other
             ENDHLSL
         }
+        Pass
+        {
+        Name "HiZ_Level_Combine"
+        ZWrite Off
+        ZTest Always
+        CUll off
+        Tags{"LightMode"="PostProcess"}
+            HLSLPROGRAM
+            #include "HiZMipmap.hlsl"
+            #pragma vertex Vert_PostProcessDefault
+            #pragma fragment Frag_HiZMip_CombineMipmap
+            ENDHLSL
+        }
     }
 }
