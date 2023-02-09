@@ -37,7 +37,7 @@ SAMPLER(sampler_CameraNormalsTexture);
 
 half3 SampleSceneNormals(half2 uv)
 {
-    half3 normal = SAMPLE_TEXTURE2D_X_LOD(_CameraNormalsTexture, sampler_CameraNormalsTexture, UnityStereoTransformScreenSpaceTex(uv),0).xyz;
+    half3 normal = SAMPLE_TEXTURE2D_X_LOD(_CameraNormalsTexture, Point_Clamp, uv,0).xyz;
 
     #if defined(_GBUFFER_NORMALS_OCT)
     half2 remappedOctNormalWS = Unpack888ToFloat2(normal); // values between [ 0,  1]
@@ -45,7 +45,7 @@ half3 SampleSceneNormals(half2 uv)
     normal = UnpackNormalOctQuadEncode(octNormalWS);
     #endif
 
-    return normal;
+    return normalize(normal);
 }
 //*******************************
 
@@ -83,8 +83,7 @@ static const int2 Pixel_Bias[9]={int2(0,-1),int2(0,0),int2(0,1),int2(1,-1),int2(
 half Bilinear_Tolerance;
 half BinarySearch_Tolerance;
 half THICKNESS;
-half STEPLENGTH;
-int SAMPLESPERPIXEL;
+int MaxIterations;
 
 TEXTURE2D(SSR_CameraTexture);
 TEXTURE2D_X_FLOAT(RT_SSR_Result1);
@@ -98,7 +97,23 @@ TEXTURE2D(_GBuffer2);
 SAMPLER(sampler_GBuffer2);
 
 half4 RT_TexelSize;
+half2 RT_TexelSize_HiZBuffer;
+half RayBias;
 
+static float2 MipmapUv_Bias(float2 uv,int Miplevel){
+    float4 Uv_Bias_Lut0[9]={float4(0.0f,0.333333334f,1.0f,1.0f),
+                            float4(0.0f,0.0f,0.5f,0.333333333f),
+                            float4(0.5f,0.16666667f,0.75f,0.333333333f),
+                            float4(0.75f,0.25f,0.875f,0.333333333f),
+                            float4(0.875f,0.2916666667f,0.9375f,0.333333333f),
+                            float4(0.9375f,0.3125f,0.96875f,0.333333333f),
+                            float4(0.96875f,0.3229166666667f,0.984375f,0.333333333f),
+                            float4(0.984375f,0.328125f,0.9921875f,0.333333333f),
+                            float4(0.9921875f,0.33072916666667f,0.99609375f,0.333333333f)};
+    float4 Uv_Bias_Lut=Uv_Bias_Lut0[Miplevel];
+    uv=saturate(uv);
+    return float2(lerp(Uv_Bias_Lut.x,Uv_Bias_Lut.z,uv.x),lerp(Uv_Bias_Lut.y,Uv_Bias_Lut.w,uv.y));
+}
 static float2 MipmapUv_Bias(float2 uv,float4 Uv_Bias_Lut){
     uv=saturate(uv);
     return float2(lerp(Uv_Bias_Lut.x,Uv_Bias_Lut.z,uv.x),lerp(Uv_Bias_Lut.y,Uv_Bias_Lut.w,uv.y));
@@ -131,7 +146,7 @@ static half SampleEyeDepthBilinear(half2 uv){
     Out_Count=(EyeDepth_01-EyeDepth_Min>=Bilinear_Tolerance)?Out_Count+1:Out_Count;
     Out_Count=(EyeDepth_10-EyeDepth_Min>=Bilinear_Tolerance)?Out_Count+1:Out_Count;
     Out_Count=(EyeDepth_11-EyeDepth_Min>=Bilinear_Tolerance)?Out_Count+1:Out_Count;
-    UNITY_BRANCH
+    [branch]
     if(Out_Count==0){
         half linear_sample=EyeDepth_00*(1-uv_frac.x)*(1-uv_frac.y)+EyeDepth_10*uv_frac.x*(1-uv_frac.y)+EyeDepth_01*uv_frac.y*(1-uv_frac.x)+EyeDepth_11*uv_frac.y*uv_frac.x;
         return linear_sample;
@@ -163,6 +178,12 @@ half Pow2(half x){
 }
 half pow4(half x){
     half Out=Pow2(x);
+    Out=Pow2(Out);
+    return Out;
+}
+half pow8(half x){
+    half Out=Pow2(x);
+    Out=Pow2(Out);
     Out=Pow2(Out);
     return Out;
 }
@@ -294,14 +315,60 @@ half3 ImportanceSampleGGX(half2 E, half Roughness,out half Pdf_D) {
 
 	return H;
 }
+int2 RayToPixelPosition(half2 uv,half2 texelsize){
+    return (int2)round(floor(uv.xy*texelsize));
+}
 struct RayTraceResult{
     half3 SceneColor;
     half HitZBufferdepth;
     half2 Hituv;
     bool HitMask;
 };
+half2 GetCurCell(half3 Ray,half2 CellSize){//获取的是格子左下角的坐标
+    half2 Result=floor(Ray.xy*CellSize+(1e-3f).xx*rcp(CellSize.xy))/CellSize;
+    return Result;
+}
+half AlignedCellXMarching(half3 Ray,half2 CellSize,half3 RayDir){//获取的是格子左下角的X坐标
+    half Result=floor(Ray.x*CellSize.x+sign(RayDir.x)+(1e-3f).x*rcp(CellSize.x))/CellSize.x;
+    return Result;
+}
+half AlignedCellYMarching(half3 Ray,half2 CellSize,half3 RayDir){//获取的是格子左下角的X坐标
+    half Result=floor(Ray.y*CellSize.y+sign(RayDir.y)+(1e-3f).x*rcp(CellSize.y))/CellSize.y;
+    return Result;
+}
+half LinearEyeDepth(half NDCDepth){
+    return LinearEyeDepth(NDCDepth,_ZBufferParams);
+}
+void UpdateRay(inout half3 Ray,out half2 RayUv,half3 RayDir,half2 TexelSize){
+    half3 Ray_Pre=Ray;
+    half2 Cell_Pre=GetCurCell(Ray_Pre,TexelSize);
+    
+    [branch]
+    if(abs(RayDir.y)<abs(RayDir.x)){
+        Ray.x=AlignedCellXMarching(Ray,TexelSize,RayDir);
+        Ray.y+=(Ray.x-Ray_Pre.x)*RayDir.y/RayDir.x;
+        half2 Cell_Cur=GetCurCell(Ray,TexelSize);
+        if(Cell_Cur.y!=Cell_Pre.y){
+            Ray=Ray_Pre;
+            Ray.y=AlignedCellYMarching(Ray,TexelSize,RayDir);
+            Ray.x+=(Ray.y-Ray_Pre.y)*RayDir.x*rcp(RayDir.y);
+        }
+    }
+    else{
+        Ray.y=AlignedCellYMarching(Ray,TexelSize,RayDir);
+        Ray.x+=(Ray.y-Ray_Pre.y)*RayDir.x/RayDir.y;
+        half2 Cell_Cur=GetCurCell(Ray,TexelSize);
+        if(Cell_Cur.x!=Cell_Pre.x){
+            Ray=Ray_Pre;
+            Ray.x=AlignedCellXMarching(Ray,TexelSize,RayDir);
+            Ray.y+=(Ray.x-Ray_Pre.x)*RayDir.y*rcp(RayDir.x);
+        }
+    }
+    RayUv=(Ray.xy+Ray_Pre.xy)*0.5f;
+    Ray.z=Ray_Pre.z+RayDir.z*length(Ray.xy-Ray_Pre.xy)/length(RayDir.xy);
+}
 RayTraceResult RayTrace_HierarchicalZ(Texture2D SceneColor,SamplerState sampler_SceneColor,half3 ViewDir,half3 RayDirVs,
-                            half2 uv,half3 RayOriginVs,half2 TexelSize,half StepLength,half Thickness,uint RandomSeed){//TexelSize横纵像素数
+                            half2 uv,half3 RayOriginVs,half2 TexelSize,half2 TexelSize_HiZBuffer,half Thickness,uint RandomSeed){//TexelSize横纵像素数
     RayTraceResult Result_None;
     Result_None.SceneColor=0;
     Result_None.HitZBufferdepth=0;
@@ -310,84 +377,94 @@ RayTraceResult RayTrace_HierarchicalZ(Texture2D SceneColor,SamplerState sampler_
     RayTraceResult Result;
     Result=Result_None;
 
+    RayTraceResult Result_Red;
+    Result_Red=Result_None;
+    Result_Red.HitMask=true;
+    Result_Red.SceneColor=half3(1,0,0);
+
+    RayTraceResult Result_Green;
+    Result_Green=Result_None;
+    Result_Green.HitMask=true;
+    Result_Green.SceneColor=half3(0,1,0);
+
+    RayTraceResult Result_Blue;
+    Result_Blue=Result_None;
+    Result_Blue.HitMask=true;
+    Result_Blue.SceneColor=half3(0,0,1);
+
+    RayTraceResult Result_Pink;
+    Result_Pink=Result_None;
+    Result_Pink.HitMask=true;
+    Result_Pink.SceneColor=half3(1,0,1);
+
     [flatten]
     if(RayDirVs.z>0){
         RayDirVs*=(-N-RayOriginVs.z)/RayDirVs.z;
     }
 
-    half Random_Thickness=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed))));
+    half Random_Thickness=lerp(0.8,1.5,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed))));
     half Random_Step=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*2))));
-    Thickness*=Random_Thickness;
+    half Random_Step_Bias=lerp(0.0,0.5,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*4))));
+    //Thickness*=Random_Thickness;
 
     half3 RayEndVs_Max=RayOriginVs+RayDirVs;
     half3 RayOriginSS=GetPositionSS(RayOriginVs).xyz;
     half3 RayEndSS=GetPositionSS(RayEndVs_Max).xyz;
-    half3 RayDirSS=RayEndSS-RayOriginSS;
+    half3 RayDirSS=normalize(RayEndSS-RayOriginSS);
 
-    half MinLengthSS=length(rcp(TexelSize.xy));
-    half L=length(RayDirSS.xy);
-    half s=max(MinLengthSS,StepLength*Random_Step)/L;
-    RayDirSS*=s;
     half3 Ray=RayOriginSS;
+    Ray.xy+=(1e-3f).xx*rcp(TexelSize_HiZBuffer.xy)*sign(RayDirSS.xy);
     half3 Ray_Pre;
+    int CurMiplevel=0;
 
     [loop]
-    for(int i=1;i<=1000;i++){
+    for(int i=1;i<=MaxIterations;i++){
         Ray_Pre=Ray;
-        Ray+=RayDirSS;
+        half2 HitUv;
+        half2 TexelSize_HiZBuffer_Cur=TexelSize_HiZBuffer.xy/(half)exp2(CurMiplevel);
+        UpdateRay(Ray,HitUv,RayDirSS,TexelSize_HiZBuffer_Cur);
         [branch]
-        if(Ray.x>1.0 || Ray.x<0.0 || Ray.y>1.0 || Ray.y<0.0){return Result_None;}
-        #if defined BILINEAR_DEPTHBUFFER
-        half Delta=LinearEyeDepth(Ray.z,_ZBufferParams)-SampleEyeDepthBilinear(Ray.xy);
-        #else
-        half Delta=LinearEyeDepth(Ray.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(Ray.xy),_ZBufferParams);
-        #endif
-        #if defined BINARY_SEARCH
-        if(Delta>0 && Delta<Thickness*BinarySearch_Tolerance){
-            half3 RayStart_Bin=Ray_Pre;
-            half3 RayEnd_Bin=Ray;
-            half3 RayMid;
-            [loop]
-            for(int j=0;j<1+BINARYSEARCHITERATIONS;j++){
-                RayMid=0.5f*(RayStart_Bin+RayEnd_Bin);
-                #if defined BILINEAR_DEPTHBUFFER
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-SampleEyeDepthBilinear(RayMid.xy);
-                #else
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(RayMid.xy),_ZBufferParams);
-                #endif
+        if(Ray.x>1.0 || Ray.x<0.0 || Ray.y>1.0 || Ray.y<0.0 || Ray.z<=0.0 || Ray.z>=1.0){return Result_Red;}
+        half DepthFront=HiZMipmap_WithMipmap.SampleLevel(Point_Clamp,MipmapUv_Bias(HitUv,CurMiplevel),0).r;
+        half DepthBack=HiZMipmap_WithMipmap.SampleLevel(Point_Clamp,MipmapUv_Bias(HitUv,CurMiplevel),0).g;
+        
+        half h0=Ray_Pre.z-DepthFront;
+        half h1=Ray.z-DepthFront;
+        half c=abs(h0)/(abs(h1)+abs(h0));
+
+        DepthFront=LinearEyeDepth(DepthFront);
+        DepthBack=LinearEyeDepth(DepthBack);
+        
+        [branch]
+        if(LinearEyeDepth(Ray.z)>DepthFront && LinearEyeDepth(Ray.z)<DepthFront+max(DepthBack-DepthFront,Thickness)){
+            [branch]
+            if(CurMiplevel!=0){
+                CurMiplevel--;
+                Ray=Ray_Pre;
+            }
+            else{
+                half2 Hituv_Accurate=lerp(Ray_Pre.xy,Ray.xy,c);
                 [branch]
-                if(Delta_Bin>0.0f){//超过
-                    RayEnd_Bin=RayMid;
+                if(dot(normalize(RayDirVs),GetNormalVs(HitUv.xy))<0.0f){
+                    Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Hituv_Accurate.xy,0).xyz;
+                    Result.Hituv=Hituv_Accurate.xy;
+                    Result.HitZBufferdepth=lerp(Ray_Pre.z,Ray.z,c);
+                    Result.HitMask=true;
+                    return Result;
                 }
-                else{//没超过
-                    RayStart_Bin=RayMid;
+                else{
+                    CurMiplevel=min(CurMiplevel+1,MaxMipLevel);
                 }
             }
-            [branch]
-            if(dot(normalize(RayDirVs),GetNormalVs(RayMid.xy))>0.0){return Result_None;}
-            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,RayMid.xy,0).xyz;
-            Result.Hituv=RayMid.xy;
-            Result.HitZBufferdepth=RayMid.z;
-            Result.HitMask=true;
-            return Result;
         }
-        #else
-        [branch]
-        if(Delta>0 && Delta<Thickness){
-            [branch]
-            if(dot(normalize(RayDirVs),GetNormalVs(Ray.xy))>0.0){return Result_None;}
-            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Ray.xy,0).xyz;
-            Result.Hituv=Ray.xy;
-            Result.HitZBufferdepth=Ray.z;
-            Result.HitMask=true;
-            return Result;
+        else{
+            CurMiplevel=min(CurMiplevel+1,MaxMipLevel);
         }
-        #endif
     }
-    return Result_None;
+    return Result_Pink;
 }
 RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneColor,half3 ViewDir,half3 RayDirVs,
-                            half2 uv,half3 RayOriginVs,half2 TexelSize,half StepLength,half Thickness,uint RandomSeed){//TexelSize横纵像素数
+                            half2 uv,half3 RayOriginVs,half2 TexelSize,half Thickness,uint RandomSeed){//TexelSize横纵像素数
     RayTraceResult Result_None;
     Result_None.SceneColor=0;
     Result_None.HitZBufferdepth=0;
@@ -401,8 +478,8 @@ RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneCo
         RayDirVs*=(-N-RayOriginVs.z)/RayDirVs.z;
     }
 
-    half Random_Thickness=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed))));
-    half Random_Step=lerp(0.6,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*2))));
+    half Random_Thickness=lerp(0.8,1.5,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed))));
+    half Random_Step=lerp(0.8,1.4,frac(GenerateHashedRandomFloat(uint4(uv*TexelSize,abs(_SinTime.x)*2000,RandomSeed*2))));
     Thickness*=Random_Thickness;
 
     half3 RayEndVs_Max=RayOriginVs+RayDirVs;
@@ -410,15 +487,22 @@ RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneCo
     half3 RayEndSS=GetPositionSS(RayEndVs_Max).xyz;
     half3 RayDirSS=RayEndSS-RayOriginSS;
 
-    half MinLengthSS=length(rcp(TexelSize.xy));
-    half L=length(RayDirSS.xy);
-    half s=max(MinLengthSS,StepLength*Random_Step)/L;
-    RayDirSS*=s;
+    half Delta;
+    [flatten]
+    if(abs(RayDirSS.y)>abs(RayDirSS.x)){
+        RayDirSS/=abs(RayDirSS.y)*TexelSize.y;
+    }
+    else{
+        RayDirSS/=abs(RayDirSS.x)*TexelSize.x;
+    }
+    RayDirSS*=Random_Step;
+
     half3 Ray=RayOriginSS;
+    Ray.xy+=(0.5f).xx*half2(sign(RayDirSS.x),sign(RayDirSS.y))/TexelSize.xy;
     half3 Ray_Pre;
 
     [loop]
-    for(int i=1;i<=1000;i++){
+    for(int i=1;i<=MaxIterations;i++){
         Ray_Pre=Ray;
         Ray+=RayDirSS;
         [branch]
@@ -428,30 +512,35 @@ RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneCo
         #else
         half Delta=LinearEyeDepth(Ray.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(Ray.xy),_ZBufferParams);
         #endif
+
         #if defined BINARY_SEARCH
         if(Delta>0 && Delta<Thickness*BinarySearch_Tolerance){
             half3 RayStart_Bin=Ray_Pre;
             half3 RayEnd_Bin=Ray;
-            half3 RayMid;
+            RayDirSS*=0.5f;
+            half3 RayMid=RayStart_Bin+RayDirSS;
+            half Delta_Bin;
             [loop]
             for(int j=0;j<1+BINARYSEARCHITERATIONS;j++){
-                RayMid=0.5f*(RayStart_Bin+RayEnd_Bin);
+                RayDirSS*=0.5f;
                 #if defined BILINEAR_DEPTHBUFFER
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-SampleEyeDepthBilinear(RayMid.xy);
+                Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-SampleEyeDepthBilinear(RayMid.xy);
                 #else
-                half Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(RayMid.xy),_ZBufferParams);
+                Delta_Bin=LinearEyeDepth(RayMid.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(RayMid.xy),_ZBufferParams);
                 #endif
                 [branch]
                 if(Delta_Bin>0.0f){//超过
-                    RayEnd_Bin=RayMid;
+                    RayMid-=RayDirSS;
                 }
                 else{//没超过
-                    RayStart_Bin=RayMid;
+                    RayMid+=RayDirSS;
                 }
             }
             [branch]
             if(dot(normalize(RayDirVs),GetNormalVs(RayMid.xy))>0.0){return Result_None;}
-            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,RayMid.xy,0).xyz;
+            half d=LinearEyeDepth(Ray.z,_ZBufferParams)-LinearEyeDepth(SampleSceneDepth(Ray.xy),_ZBufferParams);
+            d/=Thickness;
+            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,RayMid.xy,0).xyz*(1-pow8(abs(Delta_Bin/Thickness)));
             Result.Hituv=RayMid.xy;
             Result.HitZBufferdepth=RayMid.z;
             Result.HitMask=true;
@@ -462,7 +551,7 @@ RayTraceResult RayTrace_Linear(Texture2D SceneColor,SamplerState sampler_SceneCo
         if(Delta>0 && Delta<Thickness){
             [branch]
             if(dot(normalize(RayDirVs),GetNormalVs(Ray.xy))>0.0){return Result_None;}
-            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Ray.xy,0).xyz;
+            Result.SceneColor=SAMPLE_TEXTURE2D_LOD(SceneColor,sampler_SceneColor,Ray.xy,0).xyz*(1-pow8(abs(Delta/Thickness)));
             Result.Hituv=Ray.xy;
             Result.HitZBufferdepth=Ray.z;
             Result.HitMask=true;
@@ -515,60 +604,59 @@ PixelOutput_SSRResult Frag_StochasticSSR_RayTrace(VertexOutput i){
     Result_None.SceneColor_Pdf=half4(0.0f,0.0f,0.0f,0.0f);
     Result_None.HitPoint_Mask=half4(0.0f,0.0f,0.0f,0.0f);
 
-    UNITY_BRANCH
+    [branch]
     if(GetSkyBoxMask(uv)){return Result_None;}
     
     half Roughness=1-SAMPLE_TEXTURE2D(_GBuffer2,sampler_GBuffer2,uv).a;
-    UNITY_BRANCH
+    [branch]
     if(Roughness>MAXROUGHNESS){return Result_None;}
     half3 RayStart=GetPositionVs_NoFilter(uv);
     half3 ViewDir=GetViewDir(uv);
     half3 NormalVs=GetNormalVs(uv);
 
+    // [branch]
+    // if(NormalVs.z<0){return Result_None;}
+
     half2 TexelSize=RT_TexelSize.zw;
 
     half3 result=0;
-    UNITY_BRANCH
+    [branch]
     if(Roughness>=MirrorReflectionThreshold){
         half3x3 Tan2View=GetTanToViewMatrix(NormalVs);
         half3x3 View2Tan=GetViewToTanMatrix(NormalVs);
         bool Any_Hit=false;
         int Count_Hit=0;
 
-        UNITY_LOOP
-        for(int i=1;i<=SAMPLESPERPIXEL;i++){
-            half2 hash2;
-            half Pdf_tmp;
-            hash2.x=frac(GenerateHashedRandomFloat(uint4(uv*RT_TexelSize.zw,abs(_SinTime.x)*1000,1)));
-            hash2.y=frac(GenerateHashedRandomFloat(uint4(uv*RT_TexelSize.zw,abs(_SinTime.x)*2000,3)));
+        half2 hash2;
+        half Pdf_tmp;
 
-            half3 ViewDir_Tan=mul(View2Tan,ViewDir);
-            half3 MicroNormal=ImportanceSampleGGX(hash2,Roughness,Pdf_tmp).xyz;
-            half3 RayDir_Tan=GetReflectDir(ViewDir_Tan,MicroNormal);
-            RayDir_Tan.z=max(RayDir_Tan.z,ANGLE_BIAS);
-            RayDir_Tan=normalize(RayDir_Tan);
-            half3 RayDir=mul(Tan2View,RayDir_Tan);
+        hash2.x=frac(GenerateHashedRandomFloat(uint4(uv*RT_TexelSize.zw,abs(_SinTime.x)*1000,1)));
+        hash2.y=frac(GenerateHashedRandomFloat(uint4(uv*RT_TexelSize.zw,abs(_SinTime.x)*2000,3)));
 
-            RayTraceResult RayTraceResult_one=RayTrace_Linear(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,STEPLENGTH,THICKNESS,i);
-            UNITY_BRANCH
-            if(RayTraceResult_one.HitMask){
-                Result.SceneColor_Pdf.xyz+=RayTraceResult_one.SceneColor;
-                Result.SceneColor_Pdf.w+=Pdf_tmp;
-                Result.HitPoint_Mask.xyz+=half3(RayTraceResult_one.Hituv,RayTraceResult_one.HitZBufferdepth);
-                Count_Hit++;
-                Any_Hit=true;
-            }
-        }
-        UNITY_BRANCH
-        if(Any_Hit){
-            Result.SceneColor_Pdf/=Count_Hit;
-            Result.HitPoint_Mask.xyz/=Count_Hit;
-        }
-        Result.HitPoint_Mask.w=Any_Hit;
+        half3 ViewDir_Tan=mul(View2Tan,ViewDir);
+        half3 MicroNormal=ImportanceSampleGGX(hash2,Roughness,Pdf_tmp).xyz;
+        half3 RayDir_Tan=GetReflectDir(ViewDir_Tan,MicroNormal);
+        RayDir_Tan.z=max(RayDir_Tan.z,ANGLE_BIAS);
+        RayDir_Tan=normalize(RayDir_Tan);
+        half3 RayDir=mul(Tan2View,RayDir_Tan);
+
+        #if defined HIZ_ACCELERATE
+        RayTraceResult RayTraceResult_one=RayTrace_HierarchicalZ(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,RT_TexelSize_HiZBuffer,THICKNESS,2);
+        #else
+        RayTraceResult RayTraceResult_one=RayTrace_Linear(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,THICKNESS,2);
+        #endif
+        Result.SceneColor_Pdf.xyz=RayTraceResult_one.SceneColor;
+        Result.HitPoint_Mask.xyz=half3(RayTraceResult_one.Hituv,RayTraceResult_one.HitZBufferdepth);
+        Result.SceneColor_Pdf.w=Pdf_tmp;
+        Result.HitPoint_Mask.w=RayTraceResult_one.HitMask;
     }
     else{
         half3 RayDir=GetReflectDir(ViewDir,NormalVs);
-        RayTraceResult RayTraceResult_one=RayTrace_HierarchicalZ(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,STEPLENGTH,THICKNESS,1);
+        #if defined HIZ_ACCELERATE
+        RayTraceResult RayTraceResult_one=RayTrace_HierarchicalZ(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,RT_TexelSize_HiZBuffer,THICKNESS,1);
+        #else
+        RayTraceResult RayTraceResult_one=RayTrace_Linear(SSR_CameraTexture,Linear_Clamp,ViewDir,RayDir,uv,RayStart,TexelSize,THICKNESS,1);
+        #endif
         Result.SceneColor_Pdf.xyz=RayTraceResult_one.SceneColor;
         Result.HitPoint_Mask.xyz=half3(RayTraceResult_one.Hituv,RayTraceResult_one.HitZBufferdepth);
         Result.SceneColor_Pdf.w=1;
@@ -588,13 +676,13 @@ void GetRayTraceResult(half2 uv,out RayTraceResult RayInfo,out half Pdf){
 half4 Frag_StochasticSSR_Resolve(VertexOutput i):SV_Target{
     half2 uv=i.uv;
 
-    UNITY_BRANCH
+    [branch]
     if(GetSkyBoxMask(uv)){return 0.0;}
     half3 positionVs=GetPositionVs_NoFilter(uv);
     half3 ViewDir=GetViewDir(uv);
     half3 NormalVs=GetNormalVs(uv);
     half Roughness=1-SAMPLE_TEXTURE2D(_GBuffer2,sampler_GBuffer2,uv).a;
-    UNITY_BRANCH
+    [branch]
     if(Roughness<MirrorReflectionThreshold){return half4(SAMPLE_TEXTURE2D_LOD(RT_SSR_Result1,Point_Clamp,uv,0).xyz,1);}
 
     half3 MC_Iteration=0;
@@ -608,7 +696,7 @@ half4 Frag_StochasticSSR_Resolve(VertexOutput i):SV_Target{
         RayTraceResult RayTrace_Info_One;
         half Pdf_One;
         GetRayTraceResult(NeighbourUv,RayTrace_Info_One,Pdf_One);
-        UNITY_BRANCH
+        [branch]
         if(RayTrace_Info_One.HitMask){
             half3 HitPosVs=GetPositionVs(RayTrace_Info_One.HitZBufferdepth,RayTrace_Info_One.Hituv);
             half3 RayDir=normalize(HitPosVs-positionVs);
@@ -620,7 +708,7 @@ half4 Frag_StochasticSSR_Resolve(VertexOutput i):SV_Target{
         }
     }
     half3 SSR_Color=0;
-    UNITY_BRANCH
+    [branch]
     if(Any_Hit){
         SSR_Color=MC_Iteration/Count_Hit;
     }
@@ -704,22 +792,22 @@ half4 ClipToBoundingBox(half4 AABB_Min,half4 AABB_Max,half4 AABB_Avg,half4 SSR_C
     float3 rmin = AABB_Min.xyz - AABB_Avg.xyz;
 
     const float eps = FLT_EPS;
-    UNITY_BRANCH
+    [branch]
     if (r.x > rmax.x + eps)
         r *= (rmax.x / r.x);
-    UNITY_BRANCH
+    [branch]
     if (r.y > rmax.y + eps)
         r *= (rmax.y / r.y);
-    UNITY_BRANCH
+    [branch]
     if (r.z > rmax.z + eps)
         r *= (rmax.z / r.z);
-    UNITY_BRANCH
+    [branch]
     if (r.x < rmin.x - eps)
         r *= (rmin.x / r.x);
-    UNITY_BRANCH
+    [branch]
     if (r.y < rmin.y - eps)
         r *= (rmin.y / r.y);
-    UNITY_BRANCH
+    [branch]
     if (r.z < rmin.z - eps)
         r *= (rmin.z / r.z);
 
@@ -728,18 +816,8 @@ half4 ClipToBoundingBox(half4 AABB_Min,half4 AABB_Max,half4 AABB_Avg,half4 SSR_C
 TEXTURE2D(aaa);
 half4 Frag_StochasticSSR_TemporalFilter(VertexOutput i):SV_Target{
     half2 uv=i.uv;
-    //     float4 Uv_Bias_Lut[9]={float4(0.0f,0.333333334f,1.0f,1.0f),
-    //                         float4(0.0f,0.0f,0.5f,0.333333333f),
-    //                         float4(0.5f,0.16666667f,0.75f,0.333333333f),
-    //                         float4(0.75f,0.25f,0.875f,0.333333333f),
-    //                         float4(0.875f,0.2916666667f,0.9375f,0.333333333f),
-    //                         float4(0.9375f,0.3125f,0.96875f,0.333333333f),
-    //                         float4(0.96875f,0.3229166666667f,0.984375f,0.333333333f),
-    //                         float4(0.984375f,0.328125f,0.9921875f,0.333333333f),
-    //                         float4(0.9921875f,0.33072916666667f,0.99609375f,0.333333333f)};
-    // return EyeDepthToZbuffer(GetEyeDepth_HiZBuffer(uv,Uv_Bias_Lut[3]));
 
-    UNITY_BRANCH
+    [branch]
     if(GetSkyBoxMask(uv)){return 0.0;}
     half2 Closest_uv=GetClosestUv(i.uv);
     half2 Velocity=SAMPLE_TEXTURE2D_X(_MotionVectorTexture,sampler_MotionVectorTexture,Closest_uv).rg;

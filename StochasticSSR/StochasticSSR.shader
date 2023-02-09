@@ -18,6 +18,7 @@ Shader "PostProcess/StochasticSSR"
             #pragma shader_feature BINARY_SEARCH
             #pragma shader_feature BILINEAR_DEPTHBUFFER
             #pragma shader_feature FULL_PRECISION_SSR
+            #pragma shader_feature HIZ_ACCELERATE
             ENDHLSL
         }
         Pass

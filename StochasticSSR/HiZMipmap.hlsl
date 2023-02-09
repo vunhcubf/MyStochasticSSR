@@ -42,10 +42,10 @@ float2 MipmapUv_Bias_Inv(float2 uv,float4 Uv_Bias_Lut_Inv,out bool flag){
     return Result;
 }
 
-float Frag_HiZMip_0(VertexOutput i):SV_Target{
-    return SampleSceneDepth(i.uv);
+float2 Frag_HiZMip_0(VertexOutput i):SV_Target{
+    return SampleSceneDepth(i.uv).xx;
 }
-float Frag_HiZMip_Other(VertexOutput i):SV_Target{
+float2 Frag_HiZMip_Other(VertexOutput i):SV_Target{
     float2 uv=i.uv;
     uv=floor(uv*HizDestTexelSize)/HizDestTexelSize;
 
@@ -55,14 +55,15 @@ float Frag_HiZMip_Other(VertexOutput i):SV_Target{
 
     float2 du=float2(HizSourceTexelSize.x,0.0);
     float2 dv=float2(0.0,HizSourceTexelSize.y);
-    float Depth_00=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv,0).r;
-    float Depth_01=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+dv,0).r;
-    float Depth_10=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+du,0).r;
-    float Depth_11=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+dv+du,0).r;
-    float Depth_Max=max(Depth_11,max(Depth_10,max(Depth_00,Depth_01)));
-    return Depth_Max;
+    float2 Depth_00=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv,0).rg;
+    float2 Depth_01=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+dv,0).rg;
+    float2 Depth_10=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+du,0).rg;
+    float2 Depth_11=SAMPLE_TEXTURE2D_X_LOD(RT_HizSourceTex_In,point_clamp,uv+dv+du,0).rg;
+    float Depth_Max=max(Depth_11.x,max(Depth_10.x,max(Depth_00.x,Depth_01.x)));
+    float Depth_Min=min(Depth_11.y,min(Depth_10.y,min(Depth_00.y,Depth_01.y)));
+    return float2(Depth_Max,Depth_Min);
 }
-float Frag_HiZMip_CombineMipmap(VertexOutput i):SV_Target{
+float2 Frag_HiZMip_CombineMipmap(VertexOutput i):SV_Target{
     float4 Uv_Bias_Lut[9]={float4(0.0f,0.333333334f,1.0f,1.0f),
                             float4(0.0f,0.0f,0.5f,0.333333333f),
                             float4(0.5f,0.16666667f,0.75f,0.333333333f),
@@ -83,25 +84,25 @@ float Frag_HiZMip_CombineMipmap(VertexOutput i):SV_Target{
                             float4(256.0f,384.0f,254.0f,127.0f)};
     float2 uv=i.uv;
     bool flag=false;
-    float Result=0;
-    float Temp=0;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_0,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[0],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_1,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[1],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_2,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[2],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_3,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[3],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_4,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[4],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_5,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[5],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_6,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[6],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_7,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[7],flag),0).r;
-    Result+=Temp*flag;
-    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_8,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[8],flag),0).r;
-    Result+=Temp*flag;
+    float2 Result=0;
+    float2 Temp=0;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_0,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[0],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_1,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[1],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_2,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[2],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_3,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[3],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_4,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[4],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_5,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[5],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_6,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[6],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_7,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[7],flag),0).rg;
+    Result+=Temp*flag.xx;
+    Temp=SAMPLE_TEXTURE2D_X_LOD(HiZMipmap_Level_8,point_clamp,MipmapUv_Bias_Inv(uv,Uv_Bias_Inv_Lut[8],flag),0).rg;
+    Result+=Temp*flag.xx;
     return Result;
 }
