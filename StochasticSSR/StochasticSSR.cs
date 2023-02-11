@@ -307,6 +307,7 @@ namespace UnityEngine.Rendering.Universal
                         cmd.Blit(RT_SSR_Denoised_ID, renderingData.cameraData.renderer.cameraColorTarget);
                     }
                     //cmd.Blit(RT_HiZMipmap_WithMipmap, renderingData.cameraData.renderer.cameraColorTarget);
+                    //cmd.Blit(HiZMipmapBuffers_ID[5], renderingData.cameraData.renderer.cameraColorTarget);
 
                     //后处理结束
                     cmd.SetViewProjectionMatrices(camera.worldToCameraMatrix, camera.projectionMatrix);
