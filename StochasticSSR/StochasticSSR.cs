@@ -23,6 +23,7 @@ namespace UnityEngine.Rendering.Universal
             public bool Debug = false;
             [Range(0.0f, 4.0f)]
             public float RayBias = 0.5f;
+            public Texture BlueNoise;
 
             [Space(10)]
             [Header("HiZ加速结构")]
@@ -46,9 +47,9 @@ namespace UnityEngine.Rendering.Universal
             [Header("SSR设置")]
             public float Thickness = 0.1f;
             public int MaxIterations = 100;
-            [Range(0.0f, 1.0f)] public float AngleBias = 0.1f;
-            [Range(0.0f, 1.0f)] public float MaxRoughness = 0.5f;
-            [Range(0.0f, 1.0f)] public float MirrorReflectionThreshold = 0.05f;
+            public float AngleBias = 0.1f;
+            public float MaxRoughness = 0.5f;
+            public float MirrorReflectionThreshold = 0.05f;
 
             [Space(10)]
             [Header("降噪设置")]
@@ -79,6 +80,8 @@ namespace UnityEngine.Rendering.Universal
             private static readonly int P_MirrorReflectionThreshold_ID = Shader.PropertyToID("MirrorReflectionThreshold");
             private static readonly int P_TemporalFilterIntensity_ID = Shader.PropertyToID("TemporalFilterIntensity");
             private static readonly int P_RayBias_ID = Shader.PropertyToID("RayBias");
+            private static readonly int P_BlueNoise_ID = Shader.PropertyToID("BlueNoise");
+            private static readonly int P_BlueNoise_TexelSize_ID = Shader.PropertyToID("BlueNoise_TexelSize");
 
             private static readonly int P_MaxMipLevels_ID = Shader.PropertyToID("MaxMipLevel");
 
@@ -261,6 +264,8 @@ namespace UnityEngine.Rendering.Universal
                 SSRMaterial.SetInt(P_BinarySearchIterations_ID, Settings.BinarySearchIterations);
                 SSRMaterial.SetFloat(P_MirrorReflectionThreshold_ID, Settings.MirrorReflectionThreshold);
                 SSRMaterial.SetFloat(P_TemporalFilterIntensity_ID, Settings.TemporalFilterIntensity);
+                SSRMaterial.SetTexture(P_BlueNoise_ID,Settings.BlueNoise);
+                SSRMaterial.SetVector(P_BlueNoise_TexelSize_ID, new Vector2(Settings.BlueNoise.width, Settings.BlueNoise.height));
 
                 cmd.GetTemporaryRT(RT_SSR_Result1_ID, PixelWidth, PixelHeight, 0, FilterMode.Point, RenderTextureFormat.ARGBHalf);
                 cmd.GetTemporaryRT(RT_SSR_Result2_ID, PixelWidth, PixelHeight, 0, FilterMode.Point, RenderTextureFormat.ARGBHalf);
